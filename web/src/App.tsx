@@ -1,7 +1,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Activity, AlertTriangle, Check, ChevronRight, CloudOff, Droplets, Gauge, Leaf, LoaderCircle, LockKeyhole, Power, Radio, RefreshCw, Save, Settings2, ShieldCheck, ThermometerSun, Wifi, WifiOff, X } from 'lucide-react';
+import { Activity, AlertTriangle, Beaker, Check, ChevronRight, CloudOff, Droplets, Gauge, Leaf, LoaderCircle, LockKeyhole, Power, Radio, RefreshCw, Save, Settings2, ShieldCheck, ThermometerSun, Wifi, WifiOff, X } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, ApiError } from './api';
+import { demoSettings, makeDemoEvents, makeDemoHistory, makeDemoStatus } from './demo';
 import type { Reading, Settings, Status, WateringEvent } from './types';
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : 'Never';
@@ -26,6 +27,21 @@ function Login({ onLogin, error }: { onLogin: (token: string) => void; error: st
       <p className="login-foot">Arduino Nano · Local safety control · Authenticated HTTPS</p>
     </section>
   </main>;
+}
+
+function DemoUnlock({ onUnlock, error }: { onUnlock: (token: string) => Promise<void>; error: string | null }) {
+  const [token, setToken] = useState(''); const [busy, setBusy] = useState(false);
+  return <main className="login-shell"><section className="login-card demo-login">
+    <div className="brand-mark demo-mark"><Beaker size={26}/></div>
+    <p className="eyebrow">PRIVATE PRESENTATION MODE</p><h1>Safe simulation,<br/>zero hardware.</h1>
+    <p className="muted">This hidden mode uses generated sample readings. It cannot contact the Arduino, start the pump, or change Supabase.</p>
+    <form onSubmit={async (event) => { event.preventDefault(); setBusy(true); try { await onUnlock(token); } finally { setBusy(false); } }}>
+      <label htmlFor="demo-token">Demo access token</label>
+      <div className="token-field"><LockKeyhole size={18}/><input id="demo-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} autoFocus required/></div>
+      {error && <p className="form-error"><AlertTriangle size={15}/>{error}</p>}
+      <button className="primary full" type="submit" disabled={busy}>{busy ? 'Checking…' : 'Enter simulated demo'}<ChevronRight size={17}/></button>
+    </form><p className="login-foot">SIMULATED DATA · NO DEVICE COMMANDS</p>
+  </section></main>;
 }
 
 function StatusDot({ ok, label }: { ok: boolean; label: string }) { return <span className={`status-pill ${ok ? 'ok' : 'bad'}`}><i />{label}</span>; }
@@ -54,11 +70,11 @@ function Chart({ readings, settings, range, setRange }: { readings: Reading[]; s
   </section>;
 }
 
-function SettingsPanel({ settings, onSave, saving }: { settings: Settings; onSave: (s: Settings) => Promise<void>; saving: boolean }) {
+function SettingsPanel({ settings, onSave, saving, demoMode }: { settings: Settings; onSave: (s: Settings) => Promise<void>; saving: boolean; demoMode: boolean }) {
   const [draft, setDraft] = useState(settings); const [message, setMessage] = useState<string | null>(null);
   useEffect(() => setDraft(settings), [settings]);
   const number = (key: keyof Settings, value: string) => setDraft((d) => ({ ...d, [key]: Number(value) }));
-  async function submit(e: FormEvent) { e.preventDefault(); setMessage(null); try { await onSave(draft); setMessage('Saved. The bridge will send this revision to the Nano.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save settings.'); } }
+  async function submit(e: FormEvent) { e.preventDefault(); setMessage(null); try { await onSave(draft); setMessage(demoMode ? 'Demo settings updated locally. Nothing was sent to hardware.' : 'Saved. The bridge will send this revision to the Nano.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save settings.'); } }
   return <section className="panel settings-panel"><header className="panel-head"><div><p className="kicker">AUTOMATION</p><h2>Safety & thresholds</h2></div><Settings2 size={20}/></header>
     <form onSubmit={submit}><div className="form-grid">
       <label>Dry threshold<input type="number" min="21" max="1023" value={draft.dry_threshold} onChange={(e) => number('dry_threshold', e.target.value)} /></label>
@@ -76,53 +92,85 @@ function SettingsPanel({ settings, onSave, saving }: { settings: Settings; onSav
 }
 
 function App() {
+  const demoRequested = new URLSearchParams(window.location.search).get('demo') === '1';
+  const [demoMode, setDemoMode] = useState(() => sessionStorage.getItem('plant-demo-mode') === 'true');
+  const [demoError, setDemoError] = useState<string | null>(null);
   const [token, setToken] = useState(() => sessionStorage.getItem('plant-dashboard-token') ?? '');
   const [status, setStatus] = useState<Status | null>(null); const [history, setHistory] = useState<Reading[]>([]); const [events, setEvents] = useState<WateringEvent[]>([]);
   const [range, setRange] = useState<'24h' | '7d'>('24h'); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null); const [saving, setSaving] = useState(false);
   const [duration, setDuration] = useState(2000); const [confirm, setConfirm] = useState(false); const [commandNote, setCommandNote] = useState<string | null>(null); const [commandBusy, setCommandBusy] = useState(false);
 
-  const load = useCallback(async (quiet = false) => { if (!token) return; if (!quiet) setLoading(true); try { const [s, h, e] = await Promise.all([api.status(token), api.history(token, range), api.events(token)]); setStatus(s); setHistory(h.readings); setEvents(e.events); setError(null); } catch (err) { const message = err instanceof Error ? err.message : 'Dashboard unavailable'; setError(message); if (err instanceof ApiError && err.status === 401) { sessionStorage.removeItem('plant-dashboard-token'); setToken(''); } } finally { setLoading(false); } }, [token, range]);
-  useEffect(() => { void load(); const id = window.setInterval(() => void load(true), 5000); return () => window.clearInterval(id); }, [load]);
+  const load = useCallback(async (quiet = false) => {
+    if (demoMode) {
+      setStatus((current) => makeDemoStatus(Date.now(), current?.latest?.pump_on ?? false, current?.settings ?? demoSettings));
+      setHistory(makeDemoHistory(range)); setEvents((current) => current.length ? current : makeDemoEvents()); setError(null); setLoading(false); return;
+    }
+    if (!token) return; if (!quiet) setLoading(true);
+    try { const [s, h, e] = await Promise.all([api.status(token), api.history(token, range), api.events(token)]); setStatus(s); setHistory(h.readings); setEvents(e.events); setError(null); }
+    catch (err) { const message = err instanceof Error ? err.message : 'Dashboard unavailable'; setError(message); if (err instanceof ApiError && err.status === 401) { sessionStorage.removeItem('plant-dashboard-token'); setToken(''); } }
+    finally { setLoading(false); }
+  }, [demoMode, token, range]);
+  useEffect(() => { void load(); const id = window.setInterval(() => void load(true), demoMode ? 3000 : 5000); return () => window.clearInterval(id); }, [load, demoMode]);
   function login(value: string) { sessionStorage.setItem('plant-dashboard-token', value); setToken(value); }
-  async function saveSettings(next: Settings) { setSaving(true); try { const result = await api.saveSettings(token, next); setStatus((s) => s ? { ...s, settings: result.settings } : s); } finally { setSaving(false); } }
-  async function send(command: 'water' | 'stop') { setCommandBusy(true); setCommandNote(null); try { const result = await api.command(token, command, command === 'water' ? duration : undefined); setConfirm(false); setCommandNote(`Command ${result.command.status}. Waiting for device acknowledgement…`); await load(true); } catch (err) { setCommandNote(err instanceof Error ? err.message : 'Command failed'); } finally { setCommandBusy(false); } }
+  async function unlockDemo(value: string) { setDemoError(null); try { await api.demo(value); sessionStorage.setItem('plant-demo-mode', 'true'); setDemoMode(true); setLoading(true); } catch (err) { setDemoError(err instanceof Error ? err.message : 'Demo access failed'); } }
+  async function saveSettings(next: Settings) {
+    setSaving(true); try {
+      if (demoMode) { setStatus((current) => current ? { ...current, settings: { ...next, updated_at: new Date().toISOString() } } : current); return; }
+      const result = await api.saveSettings(token, next); setStatus((s) => s ? { ...s, settings: result.settings } : s);
+    } finally { setSaving(false); }
+  }
+  async function send(command: 'water' | 'stop') {
+    setCommandBusy(true); setCommandNote(null);
+    try {
+      if (demoMode) {
+        const now = Date.now(); setConfirm(false);
+        setStatus((current) => current ? { ...current, latest: current.latest ? { ...current.latest, pump_on: command === 'water' } : null } : current);
+        setCommandNote(command === 'water' ? 'Simulated pump started. No hardware command was sent.' : 'Simulated pump stopped. No hardware command was sent.');
+        setEvents((current) => [{ id: now, received_at: new Date(now).toISOString(), event: command === 'water' ? 'watering_started' : 'watering_stopped', source: command === 'water' ? 'manual' : null, reason: command === 'stop' ? 'demo_stop' : null, duration_ms: command === 'water' ? duration : null, runtime_ms: null }, ...current]);
+        if (command === 'water') window.setTimeout(() => setStatus((current) => current ? { ...current, latest: current.latest ? { ...current.latest, pump_on: false } : null } : current), duration);
+        return;
+      }
+      const result = await api.command(token, command, command === 'water' ? duration : undefined); setConfirm(false); setCommandNote(`Command ${result.command.status}. Waiting for device acknowledgement…`); await load(true);
+    } catch (err) { setCommandNote(err instanceof Error ? err.message : 'Command failed'); } finally { setCommandBusy(false); }
+  }
 
-  if (!token) return <Login onLogin={login} error={error} />;
+  if (demoRequested && !demoMode) return <DemoUnlock onUnlock={unlockDemo} error={demoError}/>;
+  if (!demoMode && !token) return <Login onLogin={login} error={error} />;
   if (loading && !status) return <main className="center"><LoaderCircle className="spin"/><span>Contacting plant controller…</span></main>;
   if (!status) return <main className="center"><CloudOff/><strong>Dashboard unavailable</strong><span>{error}</span><button className="secondary" onClick={() => load()}>Try again</button></main>;
 
   const online = status.device.bridge_online && status.device.serial_connected; const latest = status.latest; const soil = latest?.soil_state ?? 'unknown';
   const command = status.latest_command; const confirmed = command?.status === 'acknowledged'; const commandFailed = command?.status === 'failed' || command?.status === 'expired';
-  return <div className="app-shell"><header className="topbar"><div className="brand"><span className="brand-mark small"><Leaf size={19}/></span><div><strong>VERDANT</strong><small>PLANT OPERATIONS</small></div></div><div className="top-actions"><StatusDot ok={online} label={online ? 'DEVICE ONLINE' : 'DEVICE OFFLINE'}/><button className="icon-button" aria-label="Refresh" onClick={() => load()}><RefreshCw size={18}/></button></div></header>
-    <main className="dashboard"><section className="hero"><div><p className="eyebrow">{status.device.display_name.toUpperCase()}</p><h1>Good soil. Good growth.</h1><p>Live supervision with safety enforced at the device.</p></div><div className={`soil-badge ${soil}`}><span>{latest ? latest.moisture_filtered : '—'}</span><small>{soil} · RAW ADC</small></div></section>
+  return <div className={`app-shell ${demoMode ? 'is-demo' : ''}`}><header className="topbar"><div className="brand"><span className="brand-mark small"><Leaf size={19}/></span><div><strong>VERDANT</strong><small>{demoMode ? 'SIMULATION CONSOLE' : 'PLANT OPERATIONS'}</small></div></div><div className="top-actions">{demoMode ? <span className="demo-pill"><Beaker size={13}/>DEMO MODE</span> : <StatusDot ok={online} label={online ? 'DEVICE ONLINE' : 'DEVICE OFFLINE'}/>}<button className="icon-button" aria-label="Refresh" onClick={() => load()}><RefreshCw size={18}/></button></div></header>
+    <main className="dashboard">{demoMode && <div className="demo-banner"><Beaker size={19}/><div><strong>Simulated demonstration</strong><span>All readings and actions on this screen are fictional. No Arduino, pump, database, or real API command is being used.</span></div></div>}<section className="hero"><div><p className="eyebrow">{status.device.display_name.toUpperCase()}</p><h1>{demoMode ? 'A safe, interactive preview.' : 'Good soil. Good growth.'}</h1><p>{demoMode ? 'Explore every dashboard state without touching the real system.' : 'Live supervision with safety enforced at the device.'}</p></div><div className={`soil-badge ${soil}`}><span>{latest ? latest.moisture_filtered : '—'}</span><small>{soil} · {demoMode ? 'SIMULATED' : 'RAW ADC'}</small></div></section>
       {error && <div className="alert"><AlertTriangle size={18}/><span>{error}</span></div>}
       <section className="metrics">
         <Metric icon={<Gauge/>} label="SOIL CONDITION" value={soil.toUpperCase()} detail={latest ? `Raw ${latest.moisture_raw} · updated ${ago(latest.received_at)}` : 'No telemetry received'} tone={soil}/>
         <Metric icon={<Droplets/>} label="PUMP" value={latest?.pump_on ? 'RUNNING' : 'OFF'} detail={latest?.pump_on ? 'Firmware timer active' : 'Fail-safe state'} tone={latest?.pump_on ? 'wet' : ''}/>
-        <Metric icon={online ? <Wifi/> : <WifiOff/>} label="CONNECTION" value={online ? 'ONLINE' : 'OFFLINE'} detail={`Bridge seen ${ago(status.device.bridge_last_seen_at)}`} tone={online ? 'normal' : 'dry'}/>
+        <Metric icon={demoMode ? <Beaker/> : online ? <Wifi/> : <WifiOff/>} label="CONNECTION" value={demoMode ? 'DEMO' : online ? 'ONLINE' : 'OFFLINE'} detail={demoMode ? 'No hardware connected' : `Bridge seen ${ago(status.device.bridge_last_seen_at)}`} tone={online ? 'normal' : 'dry'}/>
         <Metric icon={<ThermometerSun/>} label="TODAY" value={String(status.watering_events_today)} detail="Watering cycles started" />
       </section>
       <div className="content-grid"><Chart readings={history} settings={status.settings} range={range} setRange={setRange}/>
         <section className="panel control-panel"><header className="panel-head"><div><p className="kicker">PUMP CONTROL</p><h2>Manual watering</h2></div><ShieldCheck size={21}/></header>
-          <div className={`connection-callout ${online ? 'online' : ''}`}>{online ? <Radio size={18}/> : <WifiOff size={18}/>}<div><strong>{online ? 'Bridge ready' : 'Commands unavailable'}</strong><span>{online ? 'A command can reach the Nano now.' : 'Reconnect the bridge and Arduino first.'}</span></div></div>
+          <div className={`connection-callout ${online ? 'online' : ''}`}>{demoMode ? <Beaker size={18}/> : online ? <Radio size={18}/> : <WifiOff size={18}/>}<div><strong>{demoMode ? 'Safe simulation' : online ? 'Bridge ready' : 'Commands unavailable'}</strong><span>{demoMode ? 'Controls animate locally and cannot reach a pump.' : online ? 'A command can reach the Nano now.' : 'Reconnect the bridge and Arduino first.'}</span></div></div>
           <label className="duration">Pulse duration <strong>{(duration / 1000).toFixed(1)} seconds</strong><input type="range" min="500" max={Math.min(status.settings.max_runtime_ms, 10000)} step="500" value={duration} onChange={(e) => setDuration(Number(e.target.value))}/><span><small>0.5s</small><small>{status.settings.max_runtime_ms / 1000}s safety limit</small></span></label>
-          <button className="primary full water-button" disabled={!online || !status.settings.module_verified || commandBusy || latest?.pump_on} onClick={() => setConfirm(true)}><Droplets size={18}/>Start watering pulse</button>
+          <button className="primary full water-button" disabled={!online || !status.settings.module_verified || commandBusy || latest?.pump_on} onClick={() => setConfirm(true)}><Droplets size={18}/>{demoMode ? 'Run demo watering pulse' : 'Start watering pulse'}</button>
           <button className="ghost full" disabled={!online || commandBusy} onClick={() => send('stop')}><Power size={16}/>Emergency stop</button>
           {!status.settings.module_verified && <p className="form-error"><AlertTriangle size={15}/>MOSFET module verification is required.</p>}
-          {commandNote && <p className="command-note">{confirmed ? <Check size={15}/> : commandFailed ? <AlertTriangle size={15}/> : <LoaderCircle size={15}/>} {confirmed ? `Device confirmed: ${command?.device_message ?? 'command completed'}` : commandFailed ? `Command ${command?.status}: ${command?.device_message ?? 'not executed'}` : commandNote}</p>}
+          {commandNote && <p className="command-note">{demoMode || confirmed ? <Check size={15}/> : commandFailed ? <AlertTriangle size={15}/> : <LoaderCircle size={15}/>} {demoMode ? commandNote : confirmed ? `Device confirmed: ${command?.device_message ?? 'command completed'}` : commandFailed ? `Command ${command?.status}: ${command?.device_message ?? 'not executed'}` : commandNote}</p>}
           {command && <div className="command-state"><span>Latest command</span><strong className={command.status}>{command.kind} · {command.status}</strong><small>{command.device_message ?? 'No device acknowledgement yet'}</small></div>}
         </section>
       </div>
-      <div className="lower-grid"><SettingsPanel settings={status.settings} onSave={saveSettings} saving={saving}/>
+      <div className="lower-grid"><SettingsPanel settings={status.settings} onSave={saveSettings} saving={saving} demoMode={demoMode}/>
         <section className="panel"><header className="panel-head"><div><p className="kicker">DIAGNOSTICS</p><h2>System health</h2></div><Activity size={20}/></header><dl className="diagnostics">
-          <div><dt>Serial connection</dt><dd><StatusDot ok={status.device.serial_connected} label={status.device.serial_connected ? 'CONNECTED' : 'DISCONNECTED'}/></dd></div>
-          <div><dt>Telemetry</dt><dd>{status.device.telemetry_stale ? 'Stale' : 'Current'} · {ago(latest?.received_at)}</dd></div><div><dt>Firmware</dt><dd>{status.device.firmware_version ?? 'Unknown'}</dd></div><div><dt>Bridge</dt><dd>{status.device.bridge_version ?? 'Unknown'}</dd></div><div><dt>Last device uptime</dt><dd>{latest ? `${Math.floor(latest.device_uptime_ms / 60000)} min` : '—'}</dd></div><div><dt>Backend</dt><dd>Connected</dd></div>
+          <div><dt>Serial connection</dt><dd>{demoMode ? 'Not used' : <StatusDot ok={status.device.serial_connected} label={status.device.serial_connected ? 'CONNECTED' : 'DISCONNECTED'}/>}</dd></div>
+          <div><dt>Telemetry</dt><dd>{demoMode ? 'Simulated locally' : `${status.device.telemetry_stale ? 'Stale' : 'Current'} · ${ago(latest?.received_at)}`}</dd></div><div><dt>Firmware</dt><dd>{status.device.firmware_version ?? 'Unknown'}</dd></div><div><dt>Bridge</dt><dd>{status.device.bridge_version ?? 'Unknown'}</dd></div><div><dt>Last device uptime</dt><dd>{latest ? `${Math.floor(latest.device_uptime_ms / 60000)} min` : '—'}</dd></div><div><dt>Backend</dt><dd>{demoMode ? 'Not used' : 'Connected'}</dd></div>
         </dl>{status.device.last_error && <div className="error-box"><AlertTriangle size={17}/><div><strong>Recent error</strong><span>{status.device.last_error}</span></div></div>}
           <h3 className="events-title">Recent watering events</h3><div className="events">{events.length ? events.slice(0, 6).map((event) => <div key={event.id}><i className={event.event === 'watering_started' ? 'start' : ''}/><span><strong>{event.event.replace('_', ' ')}</strong><small>{event.source ?? event.reason ?? 'device'} · {time(event.received_at)}</small></span></div>) : <p className="muted">No confirmed events yet.</p>}</div>
         </section>
-      </div><footer><span>Local firmware remains in control during internet loss.</span><button onClick={() => { sessionStorage.removeItem('plant-dashboard-token'); setToken(''); }}>Lock dashboard</button></footer>
+      </div><footer><span>{demoMode ? 'Demo mode is isolated from all real hardware and data.' : 'Local firmware remains in control during internet loss.'}</span><button onClick={() => { if (demoMode) { sessionStorage.removeItem('plant-demo-mode'); window.location.href = '/'; } else { sessionStorage.removeItem('plant-dashboard-token'); setToken(''); } }}>{demoMode ? 'Exit demo' : 'Lock dashboard'}</button></footer>
     </main>
-    {confirm && <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={() => setConfirm(false)} aria-label="Close"><X/></button><span className="modal-icon"><Droplets/></span><p className="kicker">CONFIRM MANUAL ACTION</p><h2>Water for {(duration / 1000).toFixed(1)} seconds?</h2><p>The request expires in 20 seconds. The Nano will independently enforce its {status.settings.max_runtime_ms / 1000}-second maximum.</p><div><button className="ghost" onClick={() => setConfirm(false)}>Cancel</button><button className="primary" disabled={commandBusy} onClick={() => send('water')}>{commandBusy ? 'Sending…' : 'Confirm watering'}</button></div></div></div>}
+    {confirm && <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={() => setConfirm(false)} aria-label="Close"><X/></button><span className="modal-icon"><Droplets/></span><p className="kicker">{demoMode ? 'CONFIRM SIMULATION' : 'CONFIRM MANUAL ACTION'}</p><h2>{demoMode ? 'Simulate' : 'Water for'} {(duration / 1000).toFixed(1)} seconds?</h2><p>{demoMode ? 'This only animates the demo dashboard. No network request or hardware command will be sent.' : `The request expires in 20 seconds. The Nano will independently enforce its ${status.settings.max_runtime_ms / 1000}-second maximum.`}</p><div><button className="ghost" onClick={() => setConfirm(false)}>Cancel</button><button className="primary" disabled={commandBusy} onClick={() => send('water')}>{commandBusy ? 'Starting…' : demoMode ? 'Run simulation' : 'Confirm watering'}</button></div></div></div>}
   </div>;
 }
 

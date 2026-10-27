@@ -119,8 +119,18 @@ Fill `.env.local` before `vercel dev`:
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-only database credential |
 | `BRIDGE_API_TOKEN` | Long random token used only by the bridge/API |
 | `DASHBOARD_ADMIN_TOKEN` | Different long random token entered in the dashboard |
+| `DEMO_MODE_TOKEN` | Third long random token for the hidden, hardware-isolated demo |
 
 Generate each token independently, for example: `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+### Hidden demo mode
+
+Open `https://YOUR-VERCEL-DOMAIN.vercel.app/?demo=1` and enter the server-side
+`DEMO_MODE_TOKEN`. The normal website contains no visible demo link. The demo is
+prominently labeled and generates sample telemetry only in the browser. Its pump
+and settings controls are simulated locally: they never call the command/settings
+APIs, never write to Supabase, and cannot reach the Arduino. Use **Exit demo** to
+clear the browser-session flag and return to the real login.
 
 Vite alone (`npm run dev`) serves the UI but not Vercel Functions; use `npx vercel dev` for the complete local stack. The project contains no simulated readings. Empty graphs explicitly wait for real telemetry.
 

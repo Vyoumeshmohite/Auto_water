@@ -12,6 +12,7 @@ async function request<T>(path: string, token: string, init?: RequestInit): Prom
 }
 
 export const api = {
+  demo: (token: string) => request<{ ok: true; mode: 'demo' }>('/api/demo', '', { method: 'POST', body: JSON.stringify({ token }) }),
   status: (token: string) => request<Status>(`/api/status?device_id=${DEVICE_ID}&tz_offset_min=${new Date().getTimezoneOffset()}`, token),
   history: (token: string, range: '24h' | '7d') => request<{ readings: Reading[] }>(`/api/history?device_id=${DEVICE_ID}&range=${range}`, token),
   events: (token: string) => request<{ events: WateringEvent[] }>(`/api/events?device_id=${DEVICE_ID}&limit=12`, token),

@@ -24,6 +24,13 @@ export function requireDashboard(req: VercelRequest) {
   }
 }
 
+export function requireDemoToken(received: unknown) {
+  const token = typeof received === 'string' ? received : undefined;
+  if (!equalSecret(token, process.env.DEMO_MODE_TOKEN)) {
+    throw new HttpError(401, 'unauthorized', 'The demo access token is not valid.');
+  }
+}
+
 export function requireBridgeOrDashboard(req: VercelRequest) {
   try { requireBridge(req); } catch { requireDashboard(req); }
 }
